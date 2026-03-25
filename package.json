@@ -10,6 +10,8 @@
     "@tauri-apps/cli": "^2"
   },
   "dependencies": {
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
     "tauri-plugin-serialplugin-api": "2.21.1"
   }
 }

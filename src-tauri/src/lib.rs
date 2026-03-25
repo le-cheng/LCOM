@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortType};
 use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -32,6 +33,7 @@ pub struct OpenPortResult {
 static mut GLOBAL_PORT: Option<Arc<Mutex<Box<dyn SerialPort + Send>>>> = None;
 static mut CHANNEL_SENDER: Option<Sender<String>> = None;
 static mut CHANNEL_RECEIVER: Option<Receiver<String>> = None;
+static mut RUNNING_FLAG: Option<Arc<AtomicBool>> = None;
 
 #[tauri::command]
 fn list_ports() -> Vec<SerialPortInfoResponse> {
@@ -104,10 +106,12 @@ fn open_port(port_name: String, config: SerialConfig) -> OpenPortResult {
             let port = Arc::new(Mutex::new(port));
             let port_clone = port.clone();
             let tx_clone = tx.clone();
+            let running = Arc::new(AtomicBool::new(true));
+            let running_clone = running.clone();
 
             thread::spawn(move || {
                 let mut buf: Vec<u8> = vec![0; 1024];
-                loop {
+                while running_clone.load(Ordering::SeqCst) {
                     let mut p = port_clone.lock().unwrap();
                     match p.read(&mut buf) {
                         Ok(size) => {
@@ -128,6 +132,7 @@ fn open_port(port_name: String, config: SerialConfig) -> OpenPortResult {
                 GLOBAL_PORT = Some(port);
                 CHANNEL_SENDER = Some(tx);
                 CHANNEL_RECEIVER = Some(rx);
+                RUNNING_FLAG = Some(running);
             }
 
             OpenPortResult {
@@ -145,9 +150,17 @@ fn open_port(port_name: String, config: SerialConfig) -> OpenPortResult {
 #[tauri::command]
 fn close_port() -> OpenPortResult {
     unsafe {
+        // 先设置标志为 false，让线程停止
+        if let Some(ref flag) = RUNNING_FLAG {
+            flag.store(false, Ordering::SeqCst);
+        }
+        // 等待一小段时间让线程退出
+        thread::sleep(Duration::from_millis(50));
+        // 然后清除资源
         GLOBAL_PORT = None;
         CHANNEL_SENDER = None;
         CHANNEL_RECEIVER = None;
+        RUNNING_FLAG = None;
     }
 
     OpenPortResult {
@@ -232,6 +245,8 @@ fn read_port() -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             list_ports,
             open_port,
