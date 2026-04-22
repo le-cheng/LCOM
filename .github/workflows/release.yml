@@ -32,7 +32,13 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Build portable exe
-        run: npm run tauri build -- --bundles none
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Rename exe with version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Copy-Item src-tauri/target/release/lcom.exe "LCom-${tag}-portable.exe"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -41,6 +47,6 @@ jobs:
           body: '便携版，下载 exe 即可直接运行。'
           draft: false
           prerelease: false
-          files: src-tauri/target/release/lcom.exe
+          files: LCom-*-portable.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
