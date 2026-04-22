@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LCom - 串口调试工具</title>
+    <script type="module" src="/main.js" defer></script>
+</head>
+<body>
+    <!-- 主布局 -->
+    <div id="main">
+        <!-- 左侧浮动按钮 -->
+        <button class="sidebar-float-btn float-left" id="toggle-left-sidebar" title="折叠/展开">
+            <span class="btn-inner">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="3"/>
+                    <path d="M9 3v18"/>
+                </svg>
+            </span>
+        </button>
+
+        <!-- 右侧浮动按钮 -->
+        <button class="sidebar-float-btn float-right" id="toggle-right-sidebar" title="折叠/展开">
+            <span class="btn-inner">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="3"/>
+                    <path d="M15 3v18"/>
+                </svg>
+            </span>
+        </button>
+
+        <!-- 左侧串口配置 -->
+        <div id="serial-options" class="sidebar">
+            <div class="sidebar-content">
+                <div class="input-group">
+                    <span class="input-group-text">串口</span>
+                    <select class="form-control" id="port-select">
+                        <option value="">扫描中...</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <span class="input-group-text">波特率</span>
+                    <input type="number" id="baud-rate" class="form-control" value="115200" list="baud-list" />
+                    <datalist id="baud-list">
+                        <option value="110">110</option>
+                        <option value="300">300</option>
+                        <option value="600">600</option>
+                        <option value="1200">1200</option>
+                        <option value="2400">2400</option>
+                        <option value="4800">4800</option>
+                        <option value="7200">7200</option>
+                        <option value="9600">9600</option>
+                        <option value="14400">14400</option>
+                        <option value="19200">19200</option>
+                        <option value="28800">28800</option>
+                        <option value="38400">38400</option>
+                        <option value="56000">56000</option>
+                        <option value="57600">57600</option>
+                        <option value="76800">76800</option>
+                        <option value="115200">115200</option>
+                        <option value="230400">230400</option>
+                        <option value="460800">460800</option>
+                        <option value="921600">921600</option>
+                    </datalist>
+                </div>
+
+                <div class="input-group">
+                    <span class="input-group-text">数据位</span>
+                    <select class="form-control" id="data-bits">
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8" selected>8</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <span class="input-group-text">停止位</span>
+                    <select class="form-control" id="stop-bits">
+                        <option value="1" selected>1</option>
+                        <option value="2">2</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <span class="input-group-text">校验位</span>
+                    <select class="form-control" id="parity">
+                        <option value="None" selected>None</option>
+                        <option value="Odd">Odd</option>
+                        <option value="Even">Even</option>
+                    </select>
+                </div>
+
+                <div class="btn-group">
+                    <button class="btn btn-secondary" id="refresh-ports">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                        </svg>
+                        刷新串口
+                    </button>
+                    <button class="btn btn-primary flex-grow" id="connect-btn">打开串口</button>
+                </div>
+
+                <div id="serial-status">
+                    <div class="alert alert-info">未选择串口</div>
+                </div>
+
+                <!-- 日志操作按钮 -->
+                <div class="log-action-buttons">
+                    <button class="btn btn-sm btn-outline-secondary" id="clear-receive">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                        清空
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" id="copy-log">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                        复制
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" id="save-log">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        导出
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary active" id="auto-scroll">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <polyline points="19 12 12 19 5 12"/>
+                        </svg>
+                        滚动
+                    </button>
+                </div>
+
+                <!-- 过滤器 -->
+                <div class="input-group input-group-sm filter-group">
+                    <button class="btn btn-sm btn-outline-secondary" id="filter-toggle" title="开启/关闭过滤">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+                        </svg>
+                    </button>
+                    <input type="text" id="filter-input" class="form-control" placeholder="过滤关键词..." />
+                </div>
+
+                <!-- 日志设置 -->
+                <div class="input-group input-group-sm">
+                    <span class="input-group-text">分包超时</span>
+                    <input type="number" id="packet-timeout" class="form-control" value="50" min="0" />
+                </div>
+                <div class="input-group input-group-sm">
+                    <span class="input-group-text">日志类型</span>
+                    <select class="form-control" id="log-type">
+                        <option value="hex&text">Hex+Text</option>
+                        <option value="hex">Hex</option>
+                        <option value="text">Text</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- 中间串口日志 -->
+        <div id="log-main">
+            <!-- 搜索栏 -->
+            <div class="log-search-bar" id="log-search-bar" style="display: none;">
+                <input type="text" id="search-input" placeholder="搜索..." />
+                <span class="search-count" id="search-count">0/0</span>
+                <button class="btn btn-sm" id="search-prev" title="上一个 (Shift+Enter)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="18 15 12 9 6 15"/>
+                    </svg>
+                </button>
+                <button class="btn btn-sm" id="search-next" title="下一个 (Enter)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                </button>
+                <button class="btn btn-sm" id="search-case" title="区分大小写">Aa</button>
+                <button class="btn btn-sm" id="search-close" title="关闭 (Esc)">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div id="serial-logs" class="serial-logs"></div>
+            <div class="send-section">
+                <textarea id="send-data" class="form-control" rows="3" placeholder="在此输入要发送的内容,可以是字符串(如:你好,世界!),也可以是HEX(如:49544c4c47)"></textarea>
+                <div class="send-toolbar">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="add-crlf" />
+                        <span>末尾加\r\n</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="hex-send" />
+                        <span>HEX发送</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="loop-send" />
+                        <span>循环发送</span>
+                    </label>
+                    <div class="input-group input-group-sm">
+                        <span class="input-group-text">间隔</span>
+                        <input type="number" id="loop-interval" class="form-control" value="1000" min="10" />
+                    </div>
+                    <button id="send-btn" class="btn btn" style="margin-left: auto;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 19V5M5 12l7-7 7 7"/>
+                        </svg>
+                        发送
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧串口工具 -->
+        <div id="serial-tools" class="sidebar collapsed">
+            <div class="sidebar-content">
+                <nav class="nav-tabs">
+                    <button class="nav-tab active" data-tab="quick-send">快捷发送</button>
+                    <button class="nav-tab" data-tab="settings">设置</button>
+                </nav>
+                <div class="tab-content">
+                    <!-- 快捷发送 -->
+                    <div class="tab-pane active" id="quick-send">
+                        <div class="quick-send-toolbar">
+                            <div class="input-group">
+                                <span class="input-group-text">选择分组</span>
+                                <select class="form-control" id="quick-send-group"></select>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-sm btn-outline-secondary" id="add-group">新增</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="rename-group">改名</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="remove-group">删除</button>
+                            </div>
+                        </div>
+                        <div class="quick-send-actions">
+                            <button class="btn btn-sm btn-outline-secondary" id="add-quick-item">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19"/>
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                                增加一条
+                            </button>
+                            <div class="btn-group flex-grow">
+                                <button class="btn btn-sm btn-outline-secondary" id="import-quick">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                    </svg>
+                                    导入
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary" id="export-quick">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                                    </svg>
+                                    导出
+                                </button>
+                            </div>
+                            <input type="file" id="import-file" accept=".json" style="display: none;" />
+                        </div>
+                        <div class="quick-send-header">
+                            <span>移除</span>
+                            <span>发送内容,点击修改,双击改名</span>
+                            <span>显示名称</span>
+                            <span>HEX</span>
+                        </div>
+                        <div class="quick-send-list" id="quick-send-list"></div>
+                    </div>
+                    <!-- 设置 -->
+                    <div class="tab-pane" id="settings">
+                        <h3>系统配置</h3>
+                        <div class="settings-actions">
+                            <button class="btn btn-sm btn-outline-secondary" id="reset-settings">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                                </svg>
+                                重置参数
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" id="export-settings">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                                </svg>
+                                导出配置
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" id="import-settings">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 3v12"/>
+                                </svg>
+                                导入配置
+                            </button>
+                            <input type="file" id="settings-file" accept=".json" style="display: none;" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 重命名对话框 -->
+    <div class="modal" id="rename-modal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4>名称</h4>
+                    <button class="btn-close" id="close-rename-modal">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <label>请输入新的名字:</label>
+                    <input type="text" class="form-control" id="rename-input" />
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="cancel-rename">取消</button>
+                    <button class="btn btn-primary" id="confirm-rename">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 提示对话框 -->
+    <div class="modal" id="alert-modal" style="display: none;">
+        <div class="modal-dialog modal-sm">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4>提示</h4>
+                    <button class="btn-close" id="close-alert-modal">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <p id="alert-message"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" id="confirm-alert">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 选择对话框 -->
+    <div class="modal" id="choice-modal" style="display: none;">
+        <div class="modal-dialog modal-sm">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h4 id="choice-title">选择</h4>
+                    <button class="btn-close" id="close-choice-modal">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <p id="choice-message"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="choice-cancel">取消</button>
+                    <button class="btn btn-outline-secondary" id="choice-option2">合并</button>
+                    <button class="btn btn-primary" id="choice-option1">覆盖</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
