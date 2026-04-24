@@ -20,11 +20,6 @@
       "dangerousDisableAssetCspModification": false
     }
   },
-  "plugins": {
-    "serialport": {
-      "all": true
-    }
-  },
   "bundle": {
     "active": true,
     "targets": "all",
