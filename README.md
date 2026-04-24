@@ -1,6 +1,7 @@
 # LCom - 串口调试工具
 
 基于 Tauri 2 + Vanilla JS 的轻量级串口调试工具，支持串口设备热插拔自动检测。
+![LCom](src-tauri/icons/icon.png)
 
 ## 功能
 
