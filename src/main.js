@@ -1,4 +1,25 @@
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
+const READ_INTERVAL_MS = 50;
+const PORT_CHECK_INTERVAL_MS = 1000;
+const LIVE_LOG_FLUSH_MS = 1000;
+const LIVE_LOG_BATCH_SIZE = 20;
+const DEFAULT_PACKET_TIMEOUT = 50;
+const DEFAULT_LOOP_INTERVAL = 1000;
+const MIN_FILTER_INPUT_WIDTH = 60;
+const MAX_FILTER_INPUT_WIDTH = 200;
+const MAX_LOG_LINES = 2000;
+const LOG_FILE_EOL = '\r\n';
+const HTML_ESCAPE_MAP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+};
 
 // 默认快捷发送列表
 const DEFAULT_QUICK_SEND_LIST = [
@@ -14,10 +35,20 @@ const DEFAULT_QUICK_SEND_LIST = [
 
 class SerialCom {
     constructor() {
-        this.serialPort = null;
         this.isConnected = false;
+        this.isDisconnecting = false;
         this.readInterval = null;
+        this.readInFlight = false;
+        this.portCheckInFlight = false;
+        this.lastPortCheckAt = 0;
         this.loopSendTimer = null;
+        this.unlistenDeviceMonitor = null;
+        this._clickTimer = null;
+        this.connectedPortName = '';
+        this.liveLogFilePath = '';
+        this.liveLogBuffer = [];
+        this.liveLogFlushTimer = null;
+        this.liveLogFlushInFlight = false;
 
         // 数据包合并相关
         this.serialData = [];
@@ -39,8 +70,12 @@ class SerialCom {
         this.initElements();
         this.bindEvents();
         this.applyToolOptions();
+        this.loadSerialOptions();
         this.refreshPorts();
         this.initQuickSend();
+        this.initDeviceMonitor();
+        this.initKeyboardShortcuts();
+        this.updateLiveLogBtn();
     }
 
     initElements() {
@@ -61,6 +96,7 @@ class SerialCom {
         this.clearReceive = document.getElementById('clear-receive');
         this.copyLog = document.getElementById('copy-log');
         this.saveLog = document.getElementById('save-log');
+        this.liveLogBtn = document.getElementById('live-log');
 
         // 发送相关
         this.addData = document.getElementById('add-crlf');
@@ -126,7 +162,6 @@ class SerialCom {
         this.searchResults = [];
         this.currentSearchIndex = -1;
         this.searchCaseSensitive = false;
-        this.originalLogContent = null;
 
         // 过滤状态
         this.isFilterActive = false;
@@ -147,6 +182,7 @@ class SerialCom {
         this.clearReceive.addEventListener('click', () => this.clearReceiveData());
         this.copyLog.addEventListener('click', () => this.copyLogToClipboard());
         this.saveLog.addEventListener('click', () => this.saveLogToFile());
+        this.liveLogBtn.addEventListener('click', () => this.toggleLiveLogFile());
 
         // 发送选项
         this.addData.addEventListener('change', () => this.saveToolOptions());
@@ -221,16 +257,41 @@ class SerialCom {
         // 过滤功能
         this.filterToggle.addEventListener('click', () => this.toggleFilter());
         this.filterInput.addEventListener('input', () => {
-            this.applyFilter();
+            if (this.isFilterActive) {
+                this.applyFilter();
+            } else {
+                this.clearFilter();
+            }
             this.autoResizeInput(this.filterInput);
         });
+
         // 初始化输入框宽度
         this.autoResizeInput(this.filterInput);
+        window.addEventListener('beforeunload', () => this.cleanup());
+    }
+
+    cleanup() {
+        this.stopReadLoop();
+        this.stopLoopSend();
+        clearTimeout(this.packetTimer);
+        clearTimeout(this.liveLogFlushTimer);
+        this.liveLogFlushTimer = null;
+        void this.flushLiveLogBuffer();
+
+        if (this._clickTimer) {
+            clearTimeout(this._clickTimer);
+            this._clickTimer = null;
+        }
+
+        if (typeof this.unlistenDeviceMonitor === 'function') {
+            this.unlistenDeviceMonitor();
+            this.unlistenDeviceMonitor = null;
+        }
     }
 
     autoResizeInput(input) {
         if (!input.value) {
-            input.style.width = '60px';
+            input.style.width = `${MIN_FILTER_INPUT_WIDTH}px`;
             return;
         }
         // 创建临时span计算文本宽度
@@ -248,7 +309,7 @@ class SerialCom {
         const width = span.offsetWidth;
         document.body.removeChild(span);
         // 设置宽度（加一些padding）
-        input.style.width = Math.min(Math.max(width + 16, 60), 200) + 'px';
+        input.style.width = `${Math.min(Math.max(width + 16, MIN_FILTER_INPUT_WIDTH), MAX_FILTER_INPUT_WIDTH)}px`;
     }
 
     // ========== 侧边栏切换 ==========
@@ -256,20 +317,44 @@ class SerialCom {
         sidebar.classList.toggle('collapsed');
     }
 
+    cloneValue(value) {
+        if (typeof structuredClone === 'function') {
+            return structuredClone(value);
+        }
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    loadStoredJson(key, fallbackValue) {
+        const saved = localStorage.getItem(key);
+        if (!saved) {
+            return this.cloneValue(fallbackValue);
+        }
+
+        try {
+            return JSON.parse(saved);
+        } catch (error) {
+            console.warn(`Failed to parse localStorage key "${key}":`, error);
+            return this.cloneValue(fallbackValue);
+        }
+    }
+
+    saveStoredJson(key, value) {
+        localStorage.setItem(key, JSON.stringify(value));
+    }
+
     // ========== 配置持久化 ==========
     loadToolOptions() {
-        const saved = localStorage.getItem('toolOptions');
-        return saved ? JSON.parse(saved) : {
-            packetTimeout: 50,
+        return this.loadStoredJson('toolOptions', {
+            packetTimeout: DEFAULT_PACKET_TIMEOUT,
             logType: 'hex&text',
             autoScroll: true,
             addCRLF: false,
             hexSend: false,
             loopSend: false,
-            loopInterval: 1000,
+            loopInterval: DEFAULT_LOOP_INTERVAL,
             sendContent: '',
             quickSendIndex: 0
-        };
+        });
     }
 
     saveToolOptions() {
@@ -278,33 +363,35 @@ class SerialCom {
         this.toolOptions.addCRLF = this.addData.checked;
         this.toolOptions.hexSend = this.hexSend.checked;
         this.toolOptions.loopSend = this.loopSend.checked;
-        this.toolOptions.loopInterval = parseInt(this.loopInterval.value) || 1000;
+        this.toolOptions.loopInterval = parseInt(this.loopInterval.value) || DEFAULT_LOOP_INTERVAL;
         this.toolOptions.sendContent = this.sendData.value;
         this.toolOptions.quickSendIndex = this.currentQuickGroup;
-        localStorage.setItem('toolOptions', JSON.stringify(this.toolOptions));
+        this.saveStoredJson('toolOptions', this.toolOptions);
     }
 
     applyToolOptions() {
-        this.packetTimeout.value = this.toolOptions.packetTimeout || 50;
+        this.packetTimeout.value = this.toolOptions.packetTimeout || DEFAULT_PACKET_TIMEOUT;
         this.logType.value = this.toolOptions.logType || 'hex&text';
         this.addData.checked = this.toolOptions.addCRLF || false;
         this.hexSend.checked = this.toolOptions.hexSend || false;
         this.loopSend.checked = this.toolOptions.loopSend || false;
-        this.loopInterval.value = this.toolOptions.loopInterval || 1000;
+        this.loopInterval.value = this.toolOptions.loopInterval || DEFAULT_LOOP_INTERVAL;
         this.sendData.value = this.toolOptions.sendContent || '';
         this.currentQuickGroup = this.toolOptions.quickSendIndex || 0;
         this.updateAutoScrollBtn();
     }
 
     loadSerialOptions() {
-        const saved = localStorage.getItem('serialOptions');
-        if (saved) {
-            const opts = JSON.parse(saved);
-            this.baudRate.value = opts.baudRate || 115200;
-            this.dataBits.value = opts.dataBits || 8;
-            this.stopBits.value = opts.stopBits || 1;
-            this.parity.value = opts.parity || 'None';
-        }
+        const opts = this.loadStoredJson('serialOptions', {
+            baudRate: 115200,
+            dataBits: 8,
+            stopBits: 1,
+            parity: 'None'
+        });
+        this.baudRate.value = opts.baudRate || 115200;
+        this.dataBits.value = opts.dataBits || 8;
+        this.stopBits.value = opts.stopBits || 1;
+        this.parity.value = opts.parity || 'None';
     }
 
     saveSerialOptions() {
@@ -314,20 +401,57 @@ class SerialCom {
             stopBits: parseInt(this.stopBits.value),
             parity: this.parity.value
         };
-        localStorage.setItem('serialOptions', JSON.stringify(opts));
+        this.saveStoredJson('serialOptions', opts);
     }
 
     loadQuickSendList() {
-        const saved = localStorage.getItem('quickSendList');
-        return saved ? JSON.parse(saved) : JSON.parse(JSON.stringify(DEFAULT_QUICK_SEND_LIST));
+        return this.loadStoredJson('quickSendList', DEFAULT_QUICK_SEND_LIST);
     }
 
     saveQuickSendList() {
-        localStorage.setItem('quickSendList', JSON.stringify(this.quickSendList));
+        this.saveStoredJson('quickSendList', this.quickSendList);
+    }
+
+    // ========== 设备变动监听 ==========
+    initDeviceMonitor() {
+        Promise.resolve(
+            listen('port-changed', (event) => {
+                const ports = Array.isArray(event?.payload?.ports) ? event.payload.ports : [];
+                const currentPort = this.portSelect.value;
+                this.updatePortList(ports);
+
+                if (!this.isConnected || !currentPort) {
+                    return;
+                }
+
+                const stillExists = ports.some((port) => (port.port_name || port) === currentPort);
+                if (!stillExists) {
+                    this.handlePortDisconnected(currentPort);
+                }
+            })
+        ).then((unlisten) => {
+            this.unlistenDeviceMonitor = unlisten;
+        }).catch((error) => {
+            console.error('Failed to initialize device monitor:', error);
+        });
+    }
+
+    async handlePortDisconnected(portName) {
+        if (this.isConnected) {
+            this.forceDisconnect();
+            try { await invoke('close_port'); } catch (e) { /* 设备已拔出，忽略 */ }
+        }
+        this.addErrorLog(`串口设备 ${portName} 已断开连接`);
+        await this.refreshPorts();
+        this.isDisconnecting = false;
     }
 
     // ========== 串口控制 ==========
     async refreshPorts() {
+        if (this.isConnected) {
+            return;
+        }
+
         try {
             this.portSelect.innerHTML = '<option value="">扫描中...</option>';
             const ports = await invoke('list_ports');
@@ -340,6 +464,37 @@ class SerialCom {
             option.textContent = '获取串口列表失败';
             this.portSelect.appendChild(option);
             this.showAlert('刷新串口列表失败: ' + (error.message || error));
+        }
+    }
+
+    async verifyConnectedPort() {
+        if (!this.isConnected || this.portCheckInFlight || this.isDisconnecting) {
+            return true;
+        }
+
+        const portName = this.connectedPortName || this.portSelect.value;
+        if (!portName) {
+            return false;
+        }
+
+        this.portCheckInFlight = true;
+        try {
+            const ports = await invoke('list_ports');
+            const stillExists = Array.isArray(ports)
+                && ports.some((port) => (port.port_name || port) === portName);
+
+            if (!stillExists) {
+                console.warn(`[LCom] connected port disappeared: ${portName}`);
+                await this.handlePortDisconnected(portName);
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            console.warn('Failed to verify connected port:', error);
+            return true;
+        } finally {
+            this.portCheckInFlight = false;
         }
     }
 
@@ -384,11 +539,54 @@ class SerialCom {
     }
 
     async toggleConnection() {
+        if (this.isDisconnecting) {
+            return;
+        }
+
         if (this.isConnected) {
             await this.disconnect();
         } else {
             await this.connect();
         }
+    }
+
+    stopReadLoop() {
+        if (this.readInterval) {
+            clearInterval(this.readInterval);
+            this.readInterval = null;
+        }
+        this.readInFlight = false;
+    }
+
+    stopLoopSend() {
+        if (this.loopSendTimer) {
+            clearInterval(this.loopSendTimer);
+            this.loopSendTimer = null;
+        }
+    }
+
+    resetConnectionBuffers() {
+        clearTimeout(this.packetTimer);
+        this.serialData = [];
+    }
+
+    setConnectedState(connected) {
+        this.isConnected = connected;
+        if (!connected) {
+            this.connectedPortName = '';
+        }
+        this.lastPortCheckAt = 0;
+        this.updateConnectionStatus();
+
+        this.portSelect.disabled = connected;
+        this.refreshBtn.disabled = connected;
+        this.baudRate.disabled = connected;
+        this.dataBits.disabled = connected;
+        this.stopBits.disabled = connected;
+        this.parity.disabled = connected;
+        this.connectBtn.textContent = connected ? '关闭串口' : '打开串口';
+        this.connectBtn.classList.toggle('btn-primary', !connected);
+        this.connectBtn.classList.toggle('btn-danger', connected);
     }
 
     async connect() {
@@ -409,19 +607,13 @@ class SerialCom {
             const result = await invoke('open_port', { portName: portName, config: config });
 
             if (result.success) {
-                this.isConnected = true;
+                this.resetConnectionBuffers();
+                this.connectedPortName = portName;
                 this.saveSerialOptions();
-                this.updateConnectionStatus();
+                this.setConnectedState(true);
                 this.startReading();
+                this.resetLoopSend();
 
-                this.portSelect.disabled = true;
-                this.baudRate.disabled = true;
-                this.dataBits.disabled = true;
-                this.stopBits.disabled = true;
-                this.parity.disabled = true;
-                this.connectBtn.textContent = '关闭串口';
-                this.connectBtn.classList.remove('btn-primary');
-                this.connectBtn.classList.add('btn-danger');
             } else {
                 this.showAlert(result.message);
             }
@@ -431,37 +623,82 @@ class SerialCom {
         }
     }
 
+    forceDisconnect() {
+        this.stopReadLoop();
+        this.stopLoopSend();
+        this.resetConnectionBuffers();
+        this.setConnectedState(false);
+
+    }
+
     async disconnect() {
+        if (this.isDisconnecting) {
+            return;
+        }
+
+        this.isDisconnecting = true;
         try {
-            if (this.readInterval) {
-                clearInterval(this.readInterval);
-                this.readInterval = null;
-            }
-            if (this.loopSendTimer) {
-                clearInterval(this.loopSendTimer);
-                this.loopSendTimer = null;
-            }
-            clearTimeout(this.packetTimer);
-            this.serialData = [];
+            this.stopReadLoop();
+            this.stopLoopSend();
+            this.resetConnectionBuffers();
 
             const result = await invoke('close_port');
 
             if (result.success) {
-                this.isConnected = false;
-                this.updateConnectionStatus();
+                this.setConnectedState(false);
+                await this.refreshPorts();
 
-                this.portSelect.disabled = false;
-                this.baudRate.disabled = false;
-                this.dataBits.disabled = false;
-                this.stopBits.disabled = false;
-                this.parity.disabled = false;
-                this.connectBtn.textContent = '打开串口';
-                this.connectBtn.classList.remove('btn-danger');
-                this.connectBtn.classList.add('btn-primary');
             }
         } catch (error) {
             console.error('关闭串口失败:', error);
             this.showAlert('关闭串口失败: ' + (error.message || error));
+        }
+    }
+
+    async handlePortDisconnected(portName) {
+        if (this.isDisconnecting) {
+            return;
+        }
+
+        this.isDisconnecting = true;
+        try {
+            if (this.isConnected) {
+                this.forceDisconnect();
+                try {
+                    await invoke('close_port');
+                } catch (error) {
+                    console.warn('Close after unplug failed:', error);
+                }
+            }
+
+            this.addErrorLog(`串口设备 ${portName} 已断开连接`);
+            await this.refreshPorts();
+        } finally {
+            this.isDisconnecting = false;
+        }
+    }
+
+    async disconnect() {
+        if (this.isDisconnecting) {
+            return;
+        }
+
+        this.isDisconnecting = true;
+        try {
+            this.stopReadLoop();
+            this.stopLoopSend();
+            this.resetConnectionBuffers();
+
+            const result = await invoke('close_port');
+            if (result.success) {
+                this.setConnectedState(false);
+                await this.refreshPorts();
+            }
+        } catch (error) {
+            console.error('关闭串口失败:', error);
+            this.showAlert('关闭串口失败: ' + (error.message || error));
+        } finally {
+            this.isDisconnecting = false;
         }
     }
 
@@ -475,19 +712,34 @@ class SerialCom {
 
     // ========== 数据接收与分包 ==========
     startReading() {
-        if (!this.isConnected) return;
+        if (!this.isConnected || this.readInterval) return;
 
         this.readInterval = setInterval(async () => {
+            if (!this.isConnected || this.readInFlight) {
+                return;
+            }
+
+            this.readInFlight = true;
             try {
+                const now = Date.now();
+                if (now - this.lastPortCheckAt >= PORT_CHECK_INTERVAL_MS) {
+                    this.lastPortCheckAt = now;
+                    const stillConnected = await this.verifyConnectedPort();
+                    if (!stillConnected || !this.isConnected) {
+                        return;
+                    }
+                }
+
                 const data = await invoke('read_port');
-                if (data) {
-                    const bytes = Array.from(data).map(c => c.charCodeAt(0));
-                    this.dataReceived(bytes);
+                if (Array.isArray(data) && data.length > 0) {
+                    this.dataReceived(data);
                 }
             } catch (error) {
                 // 忽略读取时的暂时性错误
+            } finally {
+                this.readInFlight = false;
             }
-        }, 50);
+        }, READ_INTERVAL_MS);
     }
 
     dataReceived(data) {
@@ -523,7 +775,7 @@ class SerialCom {
         }
 
         if (logType.includes('text')) {
-            const text = new TextDecoder().decode(new Uint8Array(data));
+            const text = TEXT_DECODER.decode(new Uint8Array(data));
             if (logType.includes('hex')) {
                 html += `\n<span class="log-text">TEXT: ${this.formatLogText(text, isReceive)}</span>`;
             } else {
@@ -534,6 +786,8 @@ class SerialCom {
         html += '</div>\n';
 
         this.receiveData.insertAdjacentHTML('beforeend', html);
+        this.trimLogEntries();
+        this.enqueueLiveLog(this.buildLogEntryText(data, isReceive, time));
 
         // 如果过滤器开启，检查新日志是否匹配
         if (this.isFilterActive) {
@@ -573,9 +827,17 @@ class SerialCom {
         const time = this.formatTime(new Date());
         const html = `<div class="log-line log-line-error"><span class="log-time">${time}</span> <span class="log-error">系统消息</span> ${this.escapeHtml(message)}</div>\n`;
         this.receiveData.insertAdjacentHTML('beforeend', html);
+        this.trimLogEntries();
+        this.enqueueLiveLog(this.buildErrorLogText(message, time));
 
         if (this.toolOptions.autoScroll) {
             this.receiveData.scrollTop = this.receiveData.scrollHeight;
+        }
+    }
+
+    trimLogEntries() {
+        while (this.receiveData.childElementCount > MAX_LOG_LINES) {
+            this.receiveData.firstElementChild?.remove();
         }
     }
 
@@ -588,9 +850,7 @@ class SerialCom {
     }
 
     escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return String(text).replace(/[&<>"']/g, (char) => HTML_ESCAPE_MAP[char]);
     }
 
     // ========== 发送数据 ==========
@@ -622,6 +882,22 @@ class SerialCom {
         }
     }
 
+    normalizeHexPayload(hex) {
+        const cleanHex = hex.replace(/\s+/g, '').toUpperCase();
+        if (!cleanHex || cleanHex.length % 2 !== 0 || !/^[0-9A-F]+$/.test(cleanHex)) {
+            return null;
+        }
+        return cleanHex;
+    }
+
+    hexToBytes(hex) {
+        const bytes = [];
+        for (let index = 0; index < hex.length; index += 2) {
+            bytes.push(parseInt(hex.slice(index, index + 2), 16));
+        }
+        return bytes;
+    }
+
     async sendText(text) {
         let data = text;
         if (this.addData.checked) {
@@ -630,7 +906,7 @@ class SerialCom {
 
         const result = await invoke('write_port', { data: data });
         if (result.success) {
-            const bytes = Array.from(new TextEncoder().encode(data));
+            const bytes = Array.from(TEXT_ENCODER.encode(data));
             this.addLogEntry(bytes, false);
         } else {
             this.showAlert(result.message);
@@ -638,22 +914,15 @@ class SerialCom {
     }
 
     async sendHex(hex) {
-        const cleanHex = hex.replace(/\s+/g, '');
-        if (!/^[0-9A-Fa-f]+$/.test(cleanHex) || cleanHex.length % 2 !== 0) {
+        const cleanHex = this.normalizeHexPayload(hex);
+        if (!cleanHex) {
             this.showAlert('无效的十六进制数据');
             return;
         }
 
-        const bytes = [];
-        for (let i = 0; i < cleanHex.length; i += 2) {
-            bytes.push(parseInt(cleanHex.substr(i, 2), 16));
-        }
-
-        if (this.addData.checked) {
-            bytes.push(0x0D, 0x0A);
-        }
-
-        const result = await invoke('write_port_hex', { hexData: cleanHex });
+        const payloadHex = this.addData.checked ? `${cleanHex}0D0A` : cleanHex;
+        const bytes = this.hexToBytes(payloadHex);
+        const result = await invoke('write_port_hex', { hexData: payloadHex });
         if (result.success) {
             this.addLogEntry(bytes, false);
         } else {
@@ -662,13 +931,10 @@ class SerialCom {
     }
 
     resetLoopSend() {
-        if (this.loopSendTimer) {
-            clearInterval(this.loopSendTimer);
-            this.loopSendTimer = null;
-        }
+        this.stopLoopSend();
 
         if (this.loopSend.checked && this.isConnected) {
-            const interval = parseInt(this.loopInterval.value) || 1000;
+            const interval = parseInt(this.loopInterval.value) || DEFAULT_LOOP_INTERVAL;
             this.loopSendTimer = setInterval(() => {
                 this.sendDataButton();
             }, interval);
@@ -741,6 +1007,171 @@ class SerialCom {
     }
 
     // ========== 快捷发送 ==========
+    updateLiveLogBtn() {
+        if (!this.liveLogBtn) {
+            return;
+        }
+
+        const isActive = Boolean(this.liveLogFilePath);
+        this.liveLogBtn.classList.toggle('active', isActive);
+        this.liveLogBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v18"/>
+                <path d="M17 8l-5-5-5 5"/>
+                <path d="M20 21H4"/>
+            </svg>
+            <span>${isActive ? '停止写文件' : '实时写文件'}</span>
+        `;
+        this.liveLogBtn.title = isActive
+            ? `正在追加到: ${this.liveLogFilePath}`
+            : '选择文件后持续分批追加日志';
+    }
+
+    ensureLiveLogApis() {
+        if (!window.__TAURI__?.dialog?.save) {
+            this.showAlert('实时写文件失败: Tauri dialog API 不可用');
+            return false;
+        }
+
+        if (!window.__TAURI__?.fs?.writeTextFile) {
+            this.showAlert('实时写文件失败: Tauri fs API 不可用');
+            return false;
+        }
+
+        return true;
+    }
+
+    buildLogEntryText(data, isReceive, time = this.formatTime(new Date())) {
+        const logType = this.logType.value;
+        const direction = isReceive ? '<-' : '->';
+        const lines = [];
+
+        if (logType.includes('hex')) {
+            const hex = data.map((byte) => byte.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+            lines.push(`${time} ${direction} HEX: ${hex}`);
+        }
+
+        if (logType.includes('text')) {
+            const text = TEXT_DECODER.decode(new Uint8Array(data));
+            if (logType.includes('hex')) {
+                lines.push(`TEXT: ${text}`);
+            } else {
+                lines.push(`${time} ${direction} ${text}`);
+            }
+        }
+
+        return `${lines.join(LOG_FILE_EOL)}${LOG_FILE_EOL}`;
+    }
+
+    buildErrorLogText(message, time = this.formatTime(new Date())) {
+        return `${time} [系统消息] ${message}${LOG_FILE_EOL}`;
+    }
+
+    enqueueLiveLog(text) {
+        if (!this.liveLogFilePath || !text) {
+            return;
+        }
+
+        this.liveLogBuffer.push(text);
+        if (this.liveLogBuffer.length >= LIVE_LOG_BATCH_SIZE) {
+            void this.flushLiveLogBuffer();
+            return;
+        }
+
+        if (!this.liveLogFlushTimer) {
+            this.liveLogFlushTimer = setTimeout(() => {
+                this.liveLogFlushTimer = null;
+                void this.flushLiveLogBuffer();
+            }, LIVE_LOG_FLUSH_MS);
+        }
+    }
+
+    async flushLiveLogBuffer() {
+        if (!this.liveLogFilePath || this.liveLogFlushInFlight || this.liveLogBuffer.length === 0) {
+            return;
+        }
+
+        if (this.liveLogFlushTimer) {
+            clearTimeout(this.liveLogFlushTimer);
+            this.liveLogFlushTimer = null;
+        }
+
+        const chunk = this.liveLogBuffer.join('');
+        this.liveLogBuffer = [];
+        this.liveLogFlushInFlight = true;
+
+        try {
+            await window.__TAURI__.fs.writeTextFile(this.liveLogFilePath, chunk, {
+                append: true,
+                create: true
+            });
+        } catch (error) {
+            this.liveLogBuffer.unshift(chunk);
+            this.liveLogFilePath = '';
+            this.updateLiveLogBtn();
+            this.showAlert('实时写文件失败: ' + (error.message || error));
+        } finally {
+            this.liveLogFlushInFlight = false;
+            if (this.liveLogFilePath && this.liveLogBuffer.length > 0) {
+                this.liveLogFlushTimer = setTimeout(() => {
+                    this.liveLogFlushTimer = null;
+                    void this.flushLiveLogBuffer();
+                }, LIVE_LOG_FLUSH_MS);
+            }
+        }
+    }
+
+    async startLiveLogFile() {
+        if (!this.ensureLiveLogApis()) {
+            return;
+        }
+
+        const filePath = await window.__TAURI__.dialog.save({
+            defaultPath: `serial_log_live_${Date.now()}.txt`,
+            filters: [{ name: 'Text', extensions: ['txt', 'log'] }]
+        });
+
+        if (!filePath) {
+            return;
+        }
+
+        await window.__TAURI__.fs.writeTextFile(filePath, '', {
+            append: true,
+            create: true
+        });
+
+        this.liveLogFilePath = filePath;
+        this.liveLogBuffer = [];
+        this.updateLiveLogBtn();
+    }
+
+    async waitForLiveLogFlush() {
+        while (this.liveLogFlushInFlight) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+    }
+
+    async stopLiveLogFile() {
+        await this.waitForLiveLogFlush();
+        await this.flushLiveLogBuffer();
+        await this.waitForLiveLogFlush();
+        this.liveLogFilePath = '';
+        this.liveLogBuffer = [];
+        this.updateLiveLogBtn();
+    }
+
+    async toggleLiveLogFile() {
+        try {
+            if (this.liveLogFilePath) {
+                await this.stopLiveLogFile();
+            } else {
+                await this.startLiveLogFile();
+            }
+        } catch (error) {
+            this.showAlert('实时写文件失败: ' + (error.message || error));
+        }
+    }
+
     initQuickSend() {
         this.updateGroupSelect();
         this.switchQuickGroup();
@@ -748,6 +1179,8 @@ class SerialCom {
 
     updateGroupSelect() {
         this.quickSendGroup.innerHTML = '';
+        const maxIndex = Math.max(this.quickSendList.length - 1, 0);
+        this.currentQuickGroup = Math.min(this.currentQuickGroup, maxIndex);
         this.quickSendList.forEach((group, index) => {
             const option = document.createElement('option');
             option.value = index;
@@ -758,14 +1191,15 @@ class SerialCom {
     }
 
     switchQuickGroup() {
-        this.currentQuickGroup = parseInt(this.quickSendGroup.value);
+        const index = parseInt(this.quickSendGroup.value, 10);
+        this.currentQuickGroup = Number.isNaN(index) ? 0 : index;
         this.saveToolOptions();
         this.renderQuickSendItems();
     }
 
     renderQuickSendItems() {
         const list = this.quickSendList[this.currentQuickGroup].list;
-        this.quickSendListEl.innerHTML = '';
+        const fragment = document.createDocumentFragment();
 
         list.forEach((item, index) => {
             const div = document.createElement('div');
@@ -781,36 +1215,48 @@ class SerialCom {
                 <button class="quick-send-name" title="${this.escapeHtml(item.name)}" data-index="${index}">${this.escapeHtml(item.name)}</button>
                 <input type="checkbox" class="quick-send-hex" ${item.hex ? 'checked' : ''} data-index="${index}">
             `;
-            this.quickSendListEl.appendChild(div);
+            fragment.appendChild(div);
         });
 
         // 绑定事件
-        this.quickSendListEl.querySelectorAll('.quick-send-remove').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const index = parseInt(e.currentTarget.dataset.index);
-                this.removeQuickItem(index);
+        this.quickSendListEl.replaceChildren(fragment);
+
+        this.quickSendListEl.querySelectorAll('.quick-send-remove').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                const index = parseInt(event.currentTarget.dataset.index, 10);
+                if (!Number.isNaN(index)) {
+                    this.removeQuickItem(index);
+                }
             });
         });
 
-        this.quickSendListEl.querySelectorAll('.quick-send-content').forEach(input => {
-            input.addEventListener('change', (e) => {
-                const index = parseInt(e.target.dataset.index);
-                this.quickSendList[this.currentQuickGroup].list[index].content = e.target.value;
+        this.quickSendListEl.querySelectorAll('.quick-send-content').forEach((input) => {
+            input.addEventListener('change', (event) => {
+                const index = parseInt(event.target.dataset.index, 10);
+                if (Number.isNaN(index)) {
+                    return;
+                }
+
+                this.quickSendList[this.currentQuickGroup].list[index].content = event.target.value;
                 this.saveQuickSendList();
             });
         });
 
-        this.quickSendListEl.querySelectorAll('.quick-send-hex').forEach(input => {
-            input.addEventListener('change', (e) => {
-                const index = parseInt(e.target.dataset.index);
-                this.quickSendList[this.currentQuickGroup].list[index].hex = e.target.checked;
+        this.quickSendListEl.querySelectorAll('.quick-send-hex').forEach((input) => {
+            input.addEventListener('change', (event) => {
+                const index = parseInt(event.target.dataset.index, 10);
+                if (Number.isNaN(index)) {
+                    return;
+                }
+
+                this.quickSendList[this.currentQuickGroup].list[index].hex = event.target.checked;
                 this.saveQuickSendList();
             });
         });
 
         this.quickSendListEl.querySelectorAll('.quick-send-name').forEach(btn => {
             btn.addEventListener('click', (e) => {
-                const index = parseInt(e.currentTarget.dataset.index);
+                const index = parseInt(e.currentTarget.dataset.index, 10);
                 // 使用延迟区分单击和双击
                 if (this._clickTimer) {
                     clearTimeout(this._clickTimer);
@@ -1275,7 +1721,6 @@ class SerialCom {
         }
 
         // 保存原始内容（用于恢复）
-        this.originalLogContent = this.receiveData.innerHTML;
 
         // 执行搜索和高亮（只在可见日志中搜索）
         this.searchResults = [];
